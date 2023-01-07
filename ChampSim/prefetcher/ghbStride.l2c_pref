@@ -1,0 +1,155 @@
+#include "cache.h"
+
+#define indexTableSize 256
+#define GHBSize 256
+#define PREFETCH_DEGREE 25
+
+class GHBEntry
+{
+public:
+  uint64_t ip;
+  int prevIndex;
+  uint64_t addr;
+  GHBEntry()
+  {
+    prevIndex=-1;
+  }
+};
+
+class indexTable 
+{
+public:
+  uint64_t ip;
+  int GHBEntryIndex;
+  int lru;//索引indextable的方式为全相联,若采用直相连则无需这个变量
+};
+
+class GHB 
+{
+public:
+  GHBEntry g[GHBSize+1];//循环队列
+  int front;
+  int rear;
+  GHB()
+  {
+    front=rear=0;
+  }
+  bool isFull()
+  {
+    return (rear+1)%GHBSize==front;
+  }
+  bool isEmpty()
+  {
+    return rear==front;
+  }
+  void push(GHBEntry e)
+  {
+    g[rear]=e;
+    rear=(rear+1)%GHBSize;
+  }
+  void pop(GHBEntry &e)
+  {
+    e=g[front];
+    front=(front+1)%GHBSize;
+  }
+};
+
+indexTable it[indexTableSize];
+GHB ghb;
+
+void CACHE::l2c_prefetcher_initialize() 
+{
+  //初始化
+  cout << "CPU " << cpu << " L2C IP-based stride prefetcher fff" << endl;
+  for(int i=0;i<indexTableSize;i++)
+    it[i].lru=i;
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in)
+{//每个 L2 查找操作都调用此函数。这意味着对二级缓存中可能命中或未命中的读写操作都会调用它
+
+  int64_t cl_addr=addr>>LOG2_BLOCK_SIZE;
+  int index=-1;
+  for(index=0;index<indexTableSize;index++)
+  {
+    if(it[index].ip==ip)
+      break;
+  }
+
+  if(index==indexTableSize)//new ip
+  {
+    for(index=0;index<indexTableSize;index++)
+    {
+      if(it[index].lru==(indexTableSize-1))
+        break;
+    }
+
+    it[index].ip=ip;
+    GHBEntry temp;
+    temp.addr=cl_addr;
+    temp.ip=ip;
+    temp.prevIndex=it[index].GHBEntryIndex;
+    it[index].GHBEntryIndex=ghb.rear;
+    ghb.push(temp);
+
+    for(int i=0;i<indexTableSize;i++)
+    {
+      if(it[i].lru<it[index].lru)
+        it[i].lru++;
+    }
+    it[index].lru=0;
+    return metadata_in;
+  }
+
+//一个改进点，当两次访问同一个地址时是否应该将这个地址放入ghb并更新indextable
+  GHBEntry e1,e2,e3;
+  e1.ip=ip;
+  e1.addr=cl_addr;
+  e1.prevIndex=it[index].GHBEntryIndex;
+  e2=ghb.g[it[index].GHBEntryIndex];
+  e3=ghb.g[e2.prevIndex];
+  if(e1.prevIndex==-1||e2.prevIndex==-1||e1.ip!=e2.ip||e2.ip!=e3.ip)
+  {
+    it[index].ip=ip;
+    it[index].GHBEntryIndex=ghb.rear;
+    ghb.push(e1);
+    return metadata_in;//表中关于这个ip的索引不足3项
+  }
+
+  int64_t stride12=0,stride23=0;//12之间的stride与23之间的stride
+  stride12=e1.addr-e2.addr;
+  stride23=e2.addr-e3.addr;
+
+  if(stride12!=stride23||stride12==0)
+    return metadata_in;//步长不一样或者两次看到同一个地址
+  
+  for(int i=0;i<=PREFETCH_DEGREE;i++)
+  {
+    uint64_t pf_address=(cl_addr+(stride12*(i+1)))<<LOG2_BLOCK_SIZE;
+    prefetch_line(ip,addr,pf_address,FILL_L2,0);
+  }
+  it[index].ip=ip;
+  it[index].GHBEntryIndex=ghb.rear;
+  ghb.push(e1);
+
+  for(int i=0;i<indexTableSize;i++)
+  {
+    if(it[i].lru<it[index].lru)
+      it[i].lru++;
+  }
+  it[index].lru=0;
+  return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+  //每个二级缓存填充操作都会调用此函数
+  return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+  //打印信息
+  cout << "CPU " << cpu << " LLC PC-based stride prefetcher final stats hhhh" << endl;
+}
+

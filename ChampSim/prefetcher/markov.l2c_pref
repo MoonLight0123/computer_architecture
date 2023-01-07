@@ -1,0 +1,88 @@
+//
+// From Data Prefetching Championship Simulator 2
+// Seth Pugsley, seth.h.pugsley@intel.com
+//
+
+/*
+
+  This file describes an Instruction Pointer-based (Program Counter-based) stride prefetcher.  
+  The prefetcher detects stride patterns coming from the same IP, and then 
+  prefetches additional cache lines.
+
+  Prefetches are issued into the L2 or LLC depending on L2 MSHR occupancy.
+
+ */
+
+#include "cache.h"
+
+#define tableEntryCount 1024
+#define PREFETCH_DEGREE 20
+
+class correlationTable 
+{
+public:
+    uint64_t tagAddr;
+    uint64_t prevAddr[PREFETCH_DEGREE];
+    int rear;
+    int count;
+    void push(uint64_t pre)
+    {
+        prevAddr[rear]=pre;
+        rear=(rear+1)%PREFETCH_DEGREE;
+        if(count<PREFETCH_DEGREE)
+            count++;
+    }
+    uint64_t getLastAddr()
+    {
+        int temp=rear--;
+        if(temp<0)
+            temp=PREFETCH_DEGREE-1;
+        return prevAddr[temp];
+    }
+};
+correlationTable table[tableEntryCount];
+int lastAddrIndex=0;
+void CACHE::l2c_prefetcher_initialize() 
+{
+    cout << "CPU " << cpu << " L2C Markov prefetcher" << endl;
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in)
+{
+    // check for a tracker hit
+    uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+    uint64_t index=cl_addr%tableEntryCount;
+
+    if(table[index].tagAddr!=cl_addr)//new ip
+    {
+        table[index].tagAddr=cl_addr;
+        table[index].count=0;
+    }
+    if(table[lastAddrIndex].getLastAddr()!=cl_addr)
+    {
+        table[lastAddrIndex].push(cl_addr);
+    }
+    int count=table[index].count;
+    int temp=table[index].rear;
+    for(int i=0;i<count;i++)
+    {
+        temp--;
+        if(temp<0)temp=PREFETCH_DEGREE-1;
+        uint64_t pf_address=table[index].prevAddr[temp]<<LOG2_BLOCK_SIZE;
+	 prefetch_line(ip, addr, pf_address, FILL_L2, 0);
+
+    }
+    lastAddrIndex=index;
+    return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+  return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+    cout << "CPU " << cpu << " L2C PC-based stride prefetcher final stats" << endl;
+}
+
